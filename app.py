@@ -49,10 +49,6 @@ def load_css():
             border-radius: 6px; font-weight: 500; border: none;
         }}
         .stButton > button[kind="primary"]:hover {{background-color: {DARK_RED};}}
-        .metric-card {{
-            background: white; padding: 20px; border-radius: 8px; 
-            border: 1px solid {LIGHT_GRAY}; text-align: center;
-        }}
     </style>
     """
 
@@ -202,14 +198,12 @@ if uploaded_file is not None:
             row_col1, row_col2, row_col3 = st.columns([3, 2, 2])
             
             with row_col1:
-                # Show original column with sample values
                 sample_vals = df[col].dropna().head(2).tolist()
                 sample_str = ", ".join([f"{v:.2e}" if isinstance(v, (int, float)) else str(v)[:15] for v in sample_vals])
                 st.text(col)
                 st.caption(f"Sample: {sample_str}")
             
             with row_col2:
-                # Rename input
                 new_name = st.text_input(
                     "Rename",
                     value=annotations[col]['renamed'],
@@ -219,7 +213,6 @@ if uploaded_file is not None:
                 annotations[col]['renamed'] = new_name
             
             with row_col3:
-                # Condition selector
                 condition = st.selectbox(
                     "Condition",
                     options=["Control", "Treatment"],
@@ -229,7 +222,6 @@ if uploaded_file is not None:
                 )
                 annotations[col]['condition'] = condition
         
-        # Update session state
         st.session_state.column_annotations = annotations
         
         st.divider()
@@ -239,7 +231,6 @@ if uploaded_file is not None:
         # ============================================================
         st.subheader("📋 Annotation Summary")
         
-        # Create summary dataframe
         summary_data = []
         for col in numerical_cols:
             ann = annotations.get(col, {'renamed': col, 'condition': 'Unknown'})
@@ -252,7 +243,6 @@ if uploaded_file is not None:
         summary_df = pd.DataFrame(summary_data)
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
         
-        # Summary statistics
         n_control = sum(1 for ann in annotations.values() if ann['condition'] == 'Control')
         n_treatment = sum(1 for ann in annotations.values() if ann['condition'] == 'Treatment')
         
@@ -327,4 +317,32 @@ else:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("🔄 **Multi-format)
+        st.markdown("🔄 **Multi-format support**")
+        st.caption("DIA-NN, Spectronaut, MaxQuant, FragPipe")
+        
+        st.markdown("🛡️ **Automatic validation**")
+        st.caption("Schema and data type checking")
+        
+        st.markdown("📊 **Smart detection**")
+        st.caption("Auto-identify column types")
+    
+    with col2:
+        st.markdown("🎯 **Auto-annotation**")
+        st.caption("Intelligent condition assignment")
+        
+        st.markdown("✏️ **Flexible renaming**")
+        st.caption("Customize sample names")
+        
+        st.markdown("👁️ **Interactive preview**")
+        st.caption("Review data before analysis")
+
+# ============================================================
+# FOOTER
+# ============================================================
+st.divider()
+st.markdown(f"""
+<div style="text-align:center; padding:20px; color:{PRIMARY_GRAY}; font-size:12px;">
+    <strong>Proprietary & Confidential | For Internal Use Only</strong><br>
+    © 2024 Thermo Fisher Scientific Inc. All rights reserved.
+</div>
+""", unsafe_allow_html=True)
