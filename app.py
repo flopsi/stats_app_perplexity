@@ -327,10 +327,4 @@ else:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("🔄 **Multi-format support**")
-        st.caption("DIA-NN, Spectronaut, MaxQuant, FragPipe")
-        
-        st.markdown("🛡️ **Automatic validation**")
-        st.caption("Schema and data type checking")
-        
-        st.markdown("📊 **Smart detection
+        st.markdown("🔄 **Multi-format)
