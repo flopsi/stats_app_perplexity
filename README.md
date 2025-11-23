@@ -1,2 +1,2 @@
-# stats_app_perplexity
+# test22
 first try using perplexity to buildan app
