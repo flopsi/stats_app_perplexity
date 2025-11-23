@@ -99,32 +99,8 @@ def clean_intensity_data(df, numerical_cols):
 # PLOTTING FUNCTIONS
 # ============================================================
 @st.cache_data
-def plot_unique_proteins(df, numerical_cols):
-    """Plot 1: Unique proteins detected"""
-    df_clean = clean_intensity_data(df, numerical_cols)
-    
-    counts = []
-    for col in numerical_cols:
-        count = df_clean[col].notna().sum()
-        counts.append(count)
-    
-    fig = go.Figure(data=[
-        go.Bar(x=numerical_cols, y=counts, marker_color=PRIMARY_RED)
-    ])
-    
-    fig.update_layout(
-        title="Unique Proteins Detected per Sample",
-        xaxis_title="Sample",
-        yaxis_title="Number of Proteins",
-        height=400,
-        template="plotly_white"
-    )
-    
-    return fig
-
-@st.cache_data
 def plot_intensity_distribution(df, numerical_cols, annotations):
-    """Plot 2: Intensity distribution violin plot"""
+    """Intensity distribution violin plot"""
     df_clean = clean_intensity_data(df, numerical_cols)
     
     data_list = []
@@ -163,7 +139,7 @@ def plot_intensity_distribution(df, numerical_cols, annotations):
 
 @st.cache_data
 def plot_cv_analysis(df, numerical_cols, annotations):
-    """Plot 3: Coefficient of Variation"""
+    """Coefficient of Variation"""
     df_clean = clean_intensity_data(df, numerical_cols)
     
     control_cols = [col for col in numerical_cols if annotations[col]['condition'] == 'Control']
@@ -206,7 +182,7 @@ def plot_cv_analysis(df, numerical_cols, annotations):
 
 @st.cache_data
 def plot_pca(df, numerical_cols, annotations):
-    """Plot 4: PCA clustering"""
+    """PCA clustering"""
     df_clean = clean_intensity_data(df, numerical_cols)
     
     # Remove rows with too many missing values
@@ -220,7 +196,7 @@ def plot_pca(df, numerical_cols, annotations):
     pca = PCA(n_components=2)
     components = pca.fit_transform(data_transposed)
     
-    # Create plot data
+    # Create plot data with renamed columns
     plot_data = []
     for idx, col in enumerate(numerical_cols):
         plot_data.append({
@@ -321,7 +297,7 @@ with tab1:
             st.subheader("🗂️ Step 3: Annotate Numerical Columns")
             st.info("ℹ **Auto-annotation:** First half → Control • Second half → Treatment")
             
-            if not st.session_state.column_annotations and len(numerical_cols) > 0:
+            if not st.session_state.column_annotations:
                 st.session_state.column_annotations = auto_annotate_columns(numerical_cols)
             
             col1, col2, col3 = st.columns([3, 2, 2])
@@ -334,11 +310,17 @@ with tab1:
             
             st.markdown("---")
             
-            annotations = st.session_state.column_annotations.copy()
+            # Create a copy to track changes
+            annotations = {}
             
             for col in numerical_cols:
-                if col not in annotations:
-                    annotations[col] = {'condition': 'Control', 'renamed': col}
+                # Initialize from session state
+                if col in st.session_state.column_annotations:
+                    default_renamed = st.session_state.column_annotations[col]['renamed']
+                    default_condition = st.session_state.column_annotations[col]['condition']
+                else:
+                    default_renamed = col
+                    default_condition = 'Control'
                 
                 row_col1, row_col2, row_col3 = st.columns([3, 2, 2])
                 
@@ -346,24 +328,31 @@ with tab1:
                     st.text(col)
                 
                 with row_col2:
+                    # Text input for renaming - use unique key
                     new_name = st.text_input(
                         "Rename",
-                        value=annotations[col]['renamed'],
-                        key=f"rename_{col}",
+                        value=default_renamed,
+                        key=f"rename_input_{col}",
                         label_visibility="collapsed"
                     )
-                    annotations[col]['renamed'] = new_name
                 
                 with row_col3:
+                    # Condition selector
                     condition = st.selectbox(
                         "Condition",
                         options=["Control", "Treatment"],
-                        index=0 if annotations[col]['condition'] == 'Control' else 1,
-                        key=f"cond_{col}",
+                        index=0 if default_condition == 'Control' else 1,
+                        key=f"cond_select_{col}",
                         label_visibility="collapsed"
                     )
-                    annotations[col]['condition'] = condition
+                
+                # Store in annotations
+                annotations[col] = {
+                    'renamed': new_name,
+                    'condition': condition
+                }
             
+            # Update session state with new annotations
             st.session_state.column_annotations = annotations
             
             st.divider()
@@ -373,7 +362,7 @@ with tab1:
             
             summary_data = []
             for col in numerical_cols:
-                ann = annotations.get(col, {'renamed': col, 'condition': 'Unknown'})
+                ann = annotations[col]
                 summary_data.append({
                     'Original': col,
                     'Renamed': ann['renamed'],
@@ -404,7 +393,7 @@ with tab2:
     st.markdown("""
     <div class="module-header">
         <h2 style="margin:0; font-size:24px;">📊 Quality Control Visualization</h2>
-        <p style="margin:5px 0 0 0; opacity:0.9;">Comprehensive data quality assessment with 4 key plots</p>
+        <p style="margin:5px 0 0 0; opacity:0.9;">Comprehensive data quality assessment with 3 key plots</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -417,34 +406,27 @@ with tab2:
         
         st.divider()
         
-        # Plot 1
-        st.subheader("1️⃣ Unique Proteins Detected")
-        fig1 = plot_unique_proteins(df, numerical_cols)
+        # Plot 1: Intensity Distribution
+        st.subheader("1️⃣ Intensity Distribution")
+        fig1 = plot_intensity_distribution(df, numerical_cols, annotations)
         st.plotly_chart(fig1, use_container_width=True)
         
         st.divider()
         
-        # Plot 2
-        st.subheader("2️⃣ Intensity Distribution")
-        fig2 = plot_intensity_distribution(df, numerical_cols, annotations)
+        # Plot 2: CV Analysis
+        st.subheader("2️⃣ Coefficient of Variation (CV)")
+        fig2 = plot_cv_analysis(df, numerical_cols, annotations)
         st.plotly_chart(fig2, use_container_width=True)
-        
-        st.divider()
-        
-        # Plot 3
-        st.subheader("3️⃣ Coefficient of Variation (CV)")
-        fig3 = plot_cv_analysis(df, numerical_cols, annotations)
-        st.plotly_chart(fig3, use_container_width=True)
         
         cv_threshold = st.slider("CV threshold for high variability (%)", 10, 200, 100)
         st.caption(f"Proteins with CV > {cv_threshold}% indicate high variability")
         
         st.divider()
         
-        # Plot 4
-        st.subheader("4️⃣ PCA: Sample Clustering")
-        fig4 = plot_pca(df, numerical_cols, annotations)
-        st.plotly_chart(fig4, use_container_width=True)
+        # Plot 3: PCA
+        st.subheader("3️⃣ PCA: Sample Clustering")
+        fig3 = plot_pca(df, numerical_cols, annotations)
+        st.plotly_chart(fig3, use_container_width=True)
         
     else:
         st.warning("⚠️ **No data uploaded.** Please upload data in Module 1 first.")
