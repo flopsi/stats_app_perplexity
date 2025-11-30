@@ -1,443 +1,216 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+from scipy.stats import ttest_ind
 import plotly.express as px
-from scipy import stats
-from sklearn.decomposition import PCA
+import yaml, json, io, zipfile
+from pathlib import Path
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-st.set_page_config(
-    page_title="DIA Proteomics Pipeline",
-    page_icon="🧬",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-# ============================================================
-# COLORS
-# ============================================================
-PRIMARY_RED = "#E71316"
-DARK_RED = "#A6192E"
-PRIMARY_GRAY = "#54585A"
-LIGHT_GRAY = "#E2E3E4"
-GREEN = "#B5BD00"
-ORANGE = "#EA7600"
-SKY = "#9BD3DD"
-
-# ============================================================
-# SESSION STATE INITIALIZATION
-# ============================================================
-if 'uploaded_data' not in st.session_state:
-    st.session_state.uploaded_data = None
-if 'column_annotations' not in st.session_state:
-    st.session_state.column_annotations = {}
-if 'current_module' not in st.session_state:
-    st.session_state.current_module = 'upload'
-
-# ============================================================
-# CACHED CSS
-# ============================================================
-@st.cache_resource
-def load_css():
-    return f"""
-    <style>
-        * {{font-family: Arial, sans-serif;}}
-        .module-header {{
-            background: linear-gradient(90deg, {PRIMARY_RED} 0%, {DARK_RED} 100%);
-            padding: 30px; border-radius: 8px; margin-bottom: 40px; color: white;
-        }}
-        .stButton > button[kind="primary"] {{
-            background-color: {PRIMARY_RED}; color: white; padding: 12px 24px;
-            border-radius: 6px; font-weight: 500; border: none;
-        }}
-        .stButton > button[kind="primary"]:hover {{background-color: {DARK_RED};}}
-    </style>
-    """
-
-st.markdown(load_css(), unsafe_allow_html=True)
-
-# ============================================================
-# HELPER FUNCTIONS - DATA PROCESSING
-# ============================================================
-def detect_column_types(df):
-    """Detect metadata vs numerical columns"""
-    metadata_cols = []
-    numerical_cols = []
-    
-    for col in df.columns:
-        numeric_values = pd.to_numeric(df[col], errors='coerce')
-        if numeric_values.isna().all():
-            metadata_cols.append(col)
-        else:
-            numerical_cols.append(col)
-    
-    return metadata_cols, numerical_cols
-
-def auto_annotate_columns(numerical_cols):
-    """Auto-assign Control/Treatment based on position"""
-    annotations = {}
-    midpoint = len(numerical_cols) // 2
-    
-    for idx, col in enumerate(numerical_cols):
-        if idx < midpoint:
-            annotations[col] = {'condition': 'Control', 'renamed': f'C{idx + 1}'}
-        else:
-            annotations[col] = {'condition': 'Treatment', 'renamed': f'T{idx - midpoint + 1}'}
-    
-    return annotations
-
-def clean_intensity_data(df, numerical_cols):
-    """Treat 0, 1, and NaN as missing values"""
-    df_clean = df[numerical_cols].copy()
-    df_clean = df_clean.replace([0, 1], np.nan)
-    return df_clean
-
-# ============================================================
-# PLOTTING FUNCTIONS
-# ============================================================
+# ---- Utility: File Handlers and Config ----
 @st.cache_data
-def plot_intensity_distribution(df, numerical_cols, annotations):
-    """Intensity distribution violin plot"""
-    df_clean = clean_intensity_data(df, numerical_cols)
-    
-    data_list = []
-    for col in numerical_cols:
-        condition = annotations[col]['condition']
-        renamed = annotations[col]['renamed']
-        values = df_clean[col].dropna()
-        log_values = np.log10(values[values > 0])
-        
-        for val in log_values:
-            data_list.append({
-                'Sample': renamed,
-                'Condition': condition,
-                'Log10 Intensity': val
-            })
-    
-    plot_df = pd.DataFrame(data_list)
-    
-    fig = px.violin(
-        plot_df,
-        x='Sample',
-        y='Log10 Intensity',
-        color='Condition',
-        color_discrete_map={'Control': SKY, 'Treatment': DARK_RED},
-        box=True,
-        points=False
-    )
-    
-    fig.update_layout(
-        title="Intensity Distribution (Log10)",
-        height=500,
-        template="plotly_white"
-    )
-    
-    return fig
+def read_matrix(file):
+    return pd.read_csv(file, sep='\t', low_memory=False)
 
-@st.cache_data
-def plot_cv_analysis(df, numerical_cols, annotations):
-    """Coefficient of Variation"""
-    df_clean = clean_intensity_data(df, numerical_cols)
-    
-    control_cols = [col for col in numerical_cols if annotations[col]['condition'] == 'Control']
-    treatment_cols = [col for col in numerical_cols if annotations[col]['condition'] == 'Treatment']
-    
-    cv_data = []
-    
-    for idx, row in df_clean.iterrows():
-        # Control CV
-        control_vals = row[control_cols].dropna()
-        if len(control_vals) > 1:
-            cv_control = (control_vals.std() / control_vals.mean()) * 100
-            cv_data.append({'Condition': 'Control', 'CV (%)': cv_control})
-        
-        # Treatment CV
-        treatment_vals = row[treatment_cols].dropna()
-        if len(treatment_vals) > 1:
-            cv_treatment = (treatment_vals.std() / treatment_vals.mean()) * 100
-            cv_data.append({'Condition': 'Treatment', 'CV (%)': cv_treatment})
-    
-    cv_df = pd.DataFrame(cv_data)
-    
-    fig = px.violin(
-        cv_df,
-        x='Condition',
-        y='CV (%)',
-        color='Condition',
-        color_discrete_map={'Control': SKY, 'Treatment': DARK_RED},
-        box=True,
-        points=False
-    )
-    
-    fig.update_layout(
-        title="Coefficient of Variation by Condition",
-        height=500,
-        template="plotly_white"
-    )
-    
-    return fig
+def find_matrix_files(folder):
+    files = list(Path(folder).glob("*.tsv"))
+    pg = next((f for f in files if "pg.matrix" in f.name or "protein" in f.name.lower()), None)
+    pr = next((f for f in files if "pr.matrix" in f.name or "precursor" in f.name.lower()), None)
+    return pg, pr
 
-@st.cache_data
-def plot_pca(df, numerical_cols, annotations):
-    """PCA clustering"""
-    df_clean = clean_intensity_data(df, numerical_cols)
-    
-    # Remove rows with too many missing values
-    df_pca = df_clean.dropna(thresh=len(numerical_cols) * 0.5)
-    df_pca = df_pca.fillna(df_pca.mean())
-    
-    # Transpose for PCA (samples as rows)
-    data_transposed = df_pca.T
-    
-    # Perform PCA
-    pca = PCA(n_components=2)
-    components = pca.fit_transform(data_transposed)
-    
-    # Create plot data with renamed columns
-    plot_data = []
-    for idx, col in enumerate(numerical_cols):
-        plot_data.append({
-            'PC1': components[idx, 0],
-            'PC2': components[idx, 1],
-            'Sample': annotations[col]['renamed'],
-            'Condition': annotations[col]['condition']
-        })
-    
-    plot_df = pd.DataFrame(plot_data)
-    
-    fig = px.scatter(
-        plot_df,
-        x='PC1',
-        y='PC2',
-        color='Condition',
-        text='Sample',
-        color_discrete_map={'Control': SKY, 'Treatment': DARK_RED},
-        size_max=15
-    )
-    
-    fig.update_traces(marker=dict(size=12), textposition='top center')
-    
-    fig.update_layout(
-        title=f"PCA: Sample Clustering (PC1: {pca.explained_variance_ratio_[0]:.1%}, PC2: {pca.explained_variance_ratio_[1]:.1%})",
-        height=500,
-        template="plotly_white"
-    )
-    
-    return fig
-
-# ============================================================
-# HEADER
-# ============================================================
-st.markdown(f"""
-<div style="background: {PRIMARY_RED}; padding: 20px; margin: -1rem -1rem 2rem -1rem; color: white;">
-    <h1 style="margin: 0; font-size: 28px;">🧬 DIA Proteomics Analysis Pipeline</h1>
-    <p style="margin: 5px 0 0 0; font-size: 14px;">Multi-Module Data Analysis Platform</p>
-</div>
-""", unsafe_allow_html=True)
-
-# ============================================================
-# MODULE SELECTION
-# ============================================================
-tab1, tab2 = st.tabs(["📁 Module 1: Data Import", "📊 Module 2: Quality Control"])
-
-# ============================================================
-# MODULE 1: DATA IMPORT
-# ============================================================
-with tab1:
-    st.markdown("""
-    <div class="module-header">
-        <h2 style="margin:0; font-size:24px;">📥 Data Import & Validation</h2>
-        <p style="margin:5px 0 0 0; opacity:0.9;">Import mass spectrometry data with automatic format detection</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.subheader("📁 Step 1: Upload Data File")
-    
-    uploaded_file = st.file_uploader(
-        "Drop CSV or TSV file here",
-        type=["csv", "tsv", "txt"],
-        help="Supports CSV/TSV files from Spectronaut, DIA-NN, MaxQuant, FragPipe"
-    )
-    
-    if uploaded_file is not None:
-        try:
-            sep = "\t" if uploaded_file.name.endswith((".tsv", ".txt")) else ","
-            df = pd.read_csv(uploaded_file, sep=sep)
-            
-            st.session_state.uploaded_data = df
-            
-            st.success(f"✓ **File loaded:** {uploaded_file.name} • {len(df):,} rows • {len(df.columns)} columns")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Rows", f"{len(df):,}")
-            with col2:
-                st.metric("Total Columns", len(df.columns))
-            with col3:
-                st.metric("File Size", f"{df.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
-            
-            st.divider()
-            
-            # Column Detection
-            st.subheader("🔍 Step 2: Column Detection")
-            metadata_cols, numerical_cols = detect_column_types(df)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("📋 Metadata Columns", len(metadata_cols))
-            with col2:
-                st.metric("📊 Numerical Columns", len(numerical_cols))
-            
-            st.divider()
-            
-            # Column Annotation
-            st.subheader("🗂️ Step 3: Annotate Numerical Columns")
-            st.info("ℹ **Auto-annotation:** First half → Control • Second half → Treatment")
-            
-            if not st.session_state.column_annotations:
-                st.session_state.column_annotations = auto_annotate_columns(numerical_cols)
-            
-            col1, col2, col3 = st.columns([3, 2, 2])
-            with col1:
-                st.markdown("**Original Column**")
-            with col2:
-                st.markdown("**Rename To**")
-            with col3:
-                st.markdown("**Condition**")
-            
-            st.markdown("---")
-            
-            # Create a copy to track changes
-            annotations = {}
-            
-            for col in numerical_cols:
-                # Initialize from session state
-                if col in st.session_state.column_annotations:
-                    default_renamed = st.session_state.column_annotations[col]['renamed']
-                    default_condition = st.session_state.column_annotations[col]['condition']
-                else:
-                    default_renamed = col
-                    default_condition = 'Control'
-                
-                row_col1, row_col2, row_col3 = st.columns([3, 2, 2])
-                
-                with row_col1:
-                    st.text(col)
-                
-                with row_col2:
-                    # Text input for renaming - use unique key
-                    new_name = st.text_input(
-                        "Rename",
-                        value=default_renamed,
-                        key=f"rename_input_{col}",
-                        label_visibility="collapsed"
-                    )
-                
-                with row_col3:
-                    # Condition selector
-                    condition = st.selectbox(
-                        "Condition",
-                        options=["Control", "Treatment"],
-                        index=0 if default_condition == 'Control' else 1,
-                        key=f"cond_select_{col}",
-                        label_visibility="collapsed"
-                    )
-                
-                # Store in annotations
-                annotations[col] = {
-                    'renamed': new_name,
-                    'condition': condition
-                }
-            
-            # Update session state with new annotations
-            st.session_state.column_annotations = annotations
-            
-            st.divider()
-            
-            # Summary
-            st.subheader("📋 Annotation Summary")
-            
-            summary_data = []
-            for col in numerical_cols:
-                ann = annotations[col]
-                summary_data.append({
-                    'Original': col,
-                    'Renamed': ann['renamed'],
-                    'Condition': ann['condition']
-                })
-            
-            summary_df = pd.DataFrame(summary_data)
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
-            
-            n_control = sum(1 for ann in annotations.values() if ann['condition'] == 'Control')
-            n_treatment = sum(1 for ann in annotations.values() if ann['condition'] == 'Treatment')
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Numerical Columns", len(numerical_cols))
-            with col2:
-                st.metric("Control Samples", n_control)
-            with col3:
-                st.metric("Treatment Samples", n_treatment)
-            
-        except Exception as e:
-            st.error(f"✕ **Error:** {str(e)}")
-
-# ============================================================
-# MODULE 2: QUALITY CONTROL
-# ============================================================
-with tab2:
-    st.markdown("""
-    <div class="module-header">
-        <h2 style="margin:0; font-size:24px;">📊 Quality Control Visualization</h2>
-        <p style="margin:5px 0 0 0; opacity:0.9;">Comprehensive data quality assessment with 3 key plots</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    if st.session_state.uploaded_data is not None and st.session_state.column_annotations:
-        df = st.session_state.uploaded_data
-        metadata_cols, numerical_cols = detect_column_types(df)
-        annotations = st.session_state.column_annotations
-        
-        st.info("ℹ **Data processing:** Values 0, 1, and NaN are treated as missing")
-        
-        st.divider()
-        
-        # Plot 1: Intensity Distribution
-        st.subheader("1️⃣ Intensity Distribution")
-        fig1 = plot_intensity_distribution(df, numerical_cols, annotations)
-        st.plotly_chart(fig1, use_container_width=True)
-        
-        st.divider()
-        
-        # Plot 2: CV Analysis
-        st.subheader("2️⃣ Coefficient of Variation (CV)")
-        fig2 = plot_cv_analysis(df, numerical_cols, annotations)
-        st.plotly_chart(fig2, use_container_width=True)
-        
-        cv_threshold = st.slider("CV threshold for high variability (%)", 10, 200, 100)
-        st.caption(f"Proteins with CV > {cv_threshold}% indicate high variability")
-        
-        st.divider()
-        
-        # Plot 3: PCA
-        st.subheader("3️⃣ PCA: Sample Clustering")
-        fig3 = plot_pca(df, numerical_cols, annotations)
-        st.plotly_chart(fig3, use_container_width=True)
-        
+def save_config(config, file_type='yaml'):
+    if file_type == 'yaml':
+        return yaml.dump(config).encode()
     else:
-        st.warning("⚠️ **No data uploaded.** Please upload data in Module 1 first.")
+        return json.dumps(config, indent=2).encode()
 
-# ============================================================
-# FOOTER
-# ============================================================
-st.divider()
-st.markdown(f"""
-<div style="text-align:center; padding:20px; color:{PRIMARY_GRAY}; font-size:12px;">
-    <strong>Proprietary & Confidential | For Internal Use Only</strong><br>
-    © 2024 Thermo Fisher Scientific Inc. All rights reserved.
-</div>
-""", unsafe_allow_html=True)
+def load_config(uploaded, file_type):
+    if file_type == 'yaml':
+        return yaml.safe_load(uploaded)
+    else:
+        return json.load(uploaded)
+
+def zip_results(dict_of_files):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for fname, fdata in dict_of_files.items():
+            zf.writestr(fname, fdata)
+    buf.seek(0)
+    return buf
+
+# ---- Synthetic Data Demo Mode ----
+def generate_synthetic_data(species_params, n_proteins=2000, n_reps=3, noise=0.13):
+    np.random.seed(42)
+    species_ids = {"HUMAN":0,"YEAST":1,"ECOLI":2,"CELEGANS":3}
+    base = []
+    for sp, fc in species_params.items():
+        for i in range(n_proteins//len(species_params)):
+            row = {
+                "Protein.Group": f"P{sp}{i+1}",
+                "Protein.Names": f"{sp}_dummy{i+1}",
+            }
+            a_vals = np.random.normal(20, noise, n_reps)
+            b_vals = a_vals + fc
+            for j in range(n_reps):
+                row[f"A{j+1:02d}"] = 2**a_vals[j]
+                row[f"B{j+1:02d}"] = 2**b_vals[j]
+            base.append(row)
+    return pd.DataFrame(base)
+
+# ---- Preprocessing / Filtering ----
+def assign_species(row, species_suffixes):
+    matches = [sp for sp,suf in species_suffixes.items() if suf in row['Protein.Names']]
+    return matches[0] if matches else 'MIXED'
+
+def filter_and_annotate(df, condA, condB, species_map, thresholds):
+    df = df.copy()
+    df['Species'] = df.apply(assign_species, axis=1, species_suffixes=species_map)
+    df = df[~df['Species'].eq('MIXED')]
+    quant_mask = (
+        df[condA].notna().sum(axis=1) >= thresholds['min_valid'] and
+        df[condB].notna().sum(axis=1) >= thresholds['min_valid']
+    )
+    df = df[quant_mask]
+    df['CV_A'] = df[condA].std(axis=1) / df[condA].mean(axis=1)
+    df['CV_B'] = df[condB].std(axis=1) / df[condB].mean(axis=1)
+    cv_mask = (df['CV_A'] <= thresholds['cv_cutoff']) & (df['CV_B'] <= thresholds['cv_cutoff'])
+    return df[cv_mask]
+
+def add_log2(df, condA, condB):
+    df = df.copy()
+    for col in condA+condB:
+        if not col.startswith("log2_"):
+            if (df[col] > 0).all():
+                df[f'log2_{col}'] = np.log2(df[col])
+    return df
+
+def diffexp(df, condA, condB, fc_thresh, alpha):
+    l2a = df[[f'log2_{c}' for c in condA]].values
+    l2b = df[[f'log2_{c}' for c in condB]].values
+    t_pvals = [ttest_ind(a, b, equal_var=False, nan_policy='omit')[1] for a,b in zip(l2a, l2b)]
+    l2fc = l2a.mean(axis=1) - l2b.mean(axis=1)
+    df['log2FC'] = l2fc
+    df['pval'] = t_pvals
+    df['signif'] = (np.abs(df['log2FC']) >= fc_thresh) & (df['pval'] <= alpha)
+    df['regulation'] = np.where(df['log2FC'] >= fc_thresh, 'UP',
+                        np.where(df['log2FC'] <= -fc_thresh, 'DOWN', 'NS'))
+    return df
+
+# ---- Summary/QC/Benchmark Metrics ----
+def compute_metrics(df, species_params):
+    stats = {}
+    deFDR = (df['Species'] != df['regulation']).mean() * 100 if "regulation" in df else np.nan
+    mean_cv = np.nanmean(np.r_[df['CV_A'], df['CV_B']]) * 100
+    asym = np.abs(df['log2FC']).median() / (np.abs(df['log2FC']).mean() + 1e-6)
+    stats['deFDR'] = deFDR
+    stats['mean_CV'] = mean_cv
+    stats['asymmetry'] = asym
+    # TP / FP / FN, sensitivity, specificity – demo only
+    expected_up = [sp for sp,fc in species_params.items() if fc>0]
+    tp = sum((df['regulation']=='UP') & df['Species'].isin(expected_up))
+    fp = sum((df['regulation']=='UP') & ~df['Species'].isin(expected_up))
+    fn = sum((df['regulation']=='DOWN') & df['Species'].isin(expected_up))
+    sens = tp/(tp+fn+1e-6)
+    spec = tp/(tp+fp+1e-6)
+    stats.update(dict(TP=tp, FP=fp, FN=fn, Sensitivity=sens, Specificity=spec))
+    return stats
+
+def pass_fail(stats):
+    return {
+        "deFDR": stats["deFDR"] <= 1.0,
+        "mean CV": stats["mean_CV"] <= 5,
+        "asymmetry": 0.5 <= stats["asymmetry"] <= 2.0,
+    }
+
+# ---- Main Streamlit App ----
+st.set_page_config('Proteomics Benchmark', layout='wide')
+st.title("Multi-Species Proteomics Workflow Benchmarking App")
+st.markdown(
+"""**End-to-end benchmarking and QC of DIA-NN bottom-up proteomics workflows with multi-species validation.**
+*Implements the protocol described by Jumel, Tobias, Shevchenko (2024, JPR) and related works.*
+"""
+)
+with st.expander("Show CITATION"):
+    st.markdown(
+        "Jumel, T. & Shevchenko, A. Multispecies Benchmark Analysis for LC-MSMS Validation and Performance Evaluation in Bottom-Up Proteomics. J. Proteome Res. 2024; see README for other references."
+    )
+
+tab1, tab2, tab3 = st.tabs(["Data", "Parameters", "Results"])
+
+with tab1:
+    st.header("Step 1: Data Ingestion")
+    demo = st.checkbox("Demo Mode: Use synthetic test data")
+    folder = None
+    if not demo:
+        folder = st.text_input("Path to DIA-NN results folder")
+        if folder:
+            pg, pr = find_matrix_files(folder)
+            if pg:
+                st.success(f"Protein Group matrix found: {pg.name}")
+            if pr:
+                st.info(f"Precursor matrix found: {pr.name}")
+    else:
+        st.info("Synthetic example data enabled.")
+    if demo or (folder and pg):
+        if demo:
+            species_params = st.session_state.get("species_params", {"HUMAN":0,"YEAST":1,"ECOLI":-2})
+            df = generate_synthetic_data(species_params)
+        else:
+            df = read_matrix(pg)
+        st.dataframe(df.head(20))
+
+with tab2:
+    st.header("Step 2: Assign Samples & Set Parameters")
+    all_cols = df.columns.tolist()
+    condA = st.multiselect("Group A sample columns", [c for c in all_cols if c.startswith("A")])
+    condB = st.multiselect("Group B sample columns", [c for c in all_cols if c.startswith("B")])
+    min_valid = st.slider("Min valid values/group", 1, len(condA), 2)
+    cv_cut = st.slider("Max CV %", 1, 50, 20)
+    fc_thresh = st.slider("Log2 FC threshold", 0, 4, 1)
+    alpha = st.number_input("Significance level (alpha)", 0.001, 0.2, 0.01)
+    species_params = st.text_area(
+        "Expected log2FC by species (JSON)", 
+        '{"HUMAN":0,"YEAST":1,"ECOLI":-2,"CELEGANS":-1}'
+    )
+    if st.button("Save Params/Config"):
+        st.download_button(
+            "Download config",
+            save_config(dict(condA=condA, condB=condB, min_valid=min_valid, cv_cut=cv_cut, fc_thresh=fc_thresh, alpha=alpha, species_params=json.loads(species_params))),
+            "config.yaml"
+        )
+
+with tab3:
+    st.header("Step 3: Analyze and Benchmark")
+    # Only proceed if columns are assigned etc.
+    if condA and condB:
+        # Preprocess
+        thresholds = dict(min_valid=min_valid, cv_cutoff=cv_cut/100)
+        species_map = {"HUMAN":"HUMAN","YEAST":"YEAST","ECOLI":"ECOLI","CELEGANS":"CELEGANS"}
+        dff = filter_and_annotate(df, condA, condB, species_map, thresholds)
+        dff = add_log2(dff, condA, condB)
+        dff = diffexp(dff, condA, condB, fc_thresh, alpha)
+        stats = compute_metrics(dff, json.loads(species_params))
+        pf = pass_fail(stats)
+        # Dashboard
+        st.subheader("Summary Dashboard")
+        st.markdown(f"- deFDR: {stats['deFDR']:.2f} {'✅' if pf['deFDR'] else '❌'}")
+        st.markdown(f"- mean CV: {stats['mean_CV']:.2f} {'✅' if pf['mean CV'] else '❌'}")
+        st.markdown(f"- Asymmetry: {stats['asymmetry']:.3f} {'✅' if pf['asymmetry'] else '❌'}")
+        st.markdown(f"- TP: {stats['TP']} | FP: {stats['FP']} | FN: {stats['FN']} | Sensitivity: {stats['Sensitivity']:.2f} | Specificity: {stats['Specificity']:.2f}")
+
+        # Plots
+        fig1 = px.scatter(dff, x='log2FC', y='pval', color='Species', title="log2FC vs p-value (Volcano)")
+        fig2 = px.histogram(dff, x='CV_A', nbins=30, title="CV Distribution A")
+        fig3 = px.density_contour(dff, x='log2FC', y='pval', title="log2FC Density vs p-value")
+        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig3, use_container_width=True)
+        st.dataframe(dff.head(40))
+
+        export_btn = st.button("Download Full Results")
+        if export_btn:
+            out_bytes = zip_results({
+                "quant_results.tsv": dff.to_csv(sep="\t", index=False),
+                "dashboard_stats.json": json.dumps(stats, indent=2),
+                "config.yaml": save_config(dict(condA=condA, condB=condB, min_valid=min_valid, cv_cut=cv_cut, fc_thresh=fc_thresh, alpha=alpha, species_params=species_params)),
+            })
+            st.download_button("Results.zip", out_bytes, "BenchmarkResults.zip")
